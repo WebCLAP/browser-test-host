@@ -153,7 +153,7 @@ class ClapAudioWorkletProcessor extends AudioWorkletProcessor {
 				throw this.fatalError = Error("Failed to create plugin: " + pluginId);
 			}
 			this.instancePluginMap[this.pluginPtr] = this; // this would be removed whenever we call `hostApi.destroyPlugin()` later
-			this.instanceAudioPointers = this.decodeCbor(hostApi.pluginStart(this.pluginPtr, globalThis.sampleRate, 0, this.maxFramesCount, this.hostedBytes));
+			this.instanceAudioPointers = this.decodeCbor(hostApi.pluginStart(this.pluginPtr, globalThis.sampleRate, 1, this.maxFramesCount, this.hostedBytes));
 			if (!this.instanceAudioPointers) {
 				throw this.fatalError = Error("Failed to start plugin: " + pluginId);
 			}
