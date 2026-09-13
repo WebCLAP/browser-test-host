@@ -433,6 +433,7 @@ struct HostedPlugin {
 		sortCopiedEvents();
 		
 		callPlugin(paramsExtPtr[&wclap_plugin_params::flush], inputEventsPtr, outputEventsPtr);
+		copiedInputEventPtrs.clear();
 	}
 
 	void hostRequestRestart() {

@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Parameter flush regression</title>
+<pre id="result">Running…</pre>
+<script type="module">
+import {run} from './test.mjs';
+window.testResult = run().then(() => {
+    document.querySelector('#result').textContent = 'PASS';
+    return {ok: true};
+}, error => {
+    document.querySelector('#result').textContent = 'FAIL: ' + error.stack;
+    return {ok: false, error: error.stack};
+});
+</script>
