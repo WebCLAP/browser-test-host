@@ -290,7 +290,8 @@ class ClapAudioWorkletProcessor extends AudioWorkletProcessor {
 	
 	process(inputs, outputs, parameters) {
 		let jsStartTime = now();
-		if (this.fatalError || !this.running || !this.ready) return false; // outputs are pre-filled with silence
+		if (this.fatalError || !this.running) return false;
+		if (!this.ready) return true; // outputs are pre-filled with silence
 
 		let blockLength = (outputs[0] || inputs[0])[0].length;
 		
@@ -351,19 +352,6 @@ class ClapAudioWorkletProcessor extends AudioWorkletProcessor {
 		if (processStatus == 0/*CLAP_PROCESS_ERROR*/) {
 			console.error("CLAP_PROCESS_ERROR");
 			return false;
-		} else if (processStatus === 2/*CLAP_PROCESS_CONTINUE_IF_NOT_QUIET*/) {
-			let energy = 0;
-			outputs.forEach(output => {
-				output.forEach(channel => {
-					channel.forEach(x => energy += x*x);
-				});
-			});
-			return (energy >= 1e-6);
-		} else if (processStatus === 3/*CLAP_PROCESS_TAIL*/) {
-			console.log("CLAP_PROCESS_TAIL not supported")
-			return inputs.some(input => input.length);
-		} else if (processStatus === 4/*CLAP_PROCESS_SLEEP*/) {
-			return inputs.some(input => input.length); // continue only if there's more input
 		}
 		return true;
 	}
