@@ -36,6 +36,18 @@ extern "C" {
 	void WASM_FN(pluginMainThread)(HostedPlugin *plugin) {
 		plugin->mainThread();
 	}
+	bool WASM_FN(pluginTakeProcessRequest)(HostedPlugin *plugin) {
+		return plugin->takeProcessRequest();
+	}
+	void WASM_FN(pluginAdvanceSteadyTime)(HostedPlugin *plugin, uint32_t blockLength) {
+		plugin->advanceSteadyTime(blockLength);
+	}
+	bool WASM_FN(pluginSetProcessing)(HostedPlugin *plugin, bool processing) {
+		return plugin->setProcessing(processing);
+	}
+	uint32_t WASM_FN(pluginGetTail)(HostedPlugin *plugin) {
+		return plugin->tailSamples();
+	}
 	void WASM_FN(pluginGetInfo)(HostedPlugin *plugin, Bytes *bytes) {
 		auto cbor = bytes->write();
 		return plugin->getInfo(cbor);

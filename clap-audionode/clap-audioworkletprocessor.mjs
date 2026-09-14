@@ -1,6 +1,7 @@
 import {getHost, startHost, getWclap} from "./wclap-js/wclap.mjs";
 import {hostImports} from "./host-imports.mjs";
 import CBOR from "./cbor.mjs";
+import ProcessLifecycle, {CLAP_PROCESS_ERROR} from "./process-lifecycle.mjs";
 
 // For debugging, we sometimes import this module into the main page, and makes that work
 export default null;
@@ -39,10 +40,10 @@ class ClapAudioWorkletProcessor extends AudioWorkletProcessor {
 
 	// specific to this module
 	pluginPtr;
+	processLifecycle;
 	
 	ready = false;
 	readyPromise = null;
-	running = true;
 	routingId;
 	static #cleanup = new FinalizationRegistry(routingId => {
 		delete globalThis.clapRouting[routingId];
@@ -157,6 +158,12 @@ class ClapAudioWorkletProcessor extends AudioWorkletProcessor {
 			if (!this.instanceAudioPointers) {
 				throw this.fatalError = Error("Failed to start plugin: " + pluginId);
 			}
+			this.processLifecycle = new ProcessLifecycle({
+				getTailSamples: () => hostApi.pluginGetTail(this.pluginPtr),
+				takeProcessRequest: () => hostApi.pluginTakeProcessRequest(this.pluginPtr),
+				advanceSteadyTime: frameCount => hostApi.pluginAdvanceSteadyTime(this.pluginPtr, frameCount),
+				setProcessing: processing => hostApi.pluginSetProcessing(this.pluginPtr, processing),
+			});
 			this.ready = true;
 			readyFn();
 
@@ -173,6 +180,7 @@ class ClapAudioWorkletProcessor extends AudioWorkletProcessor {
 				if (data instanceof ArrayBuffer) {
 					let bytes = new Uint8Array(data);
 					hostApi.pluginMessage(this.pluginPtr, this.sendBytes(bytes));
+					this.processLifecycle.wake();
 					return;
 				}
 				let [requestId, method, args] = data;
@@ -231,10 +239,10 @@ class ClapAudioWorkletProcessor extends AudioWorkletProcessor {
 
 	remoteMethods = {
 		pause() {
-			this.running = false;
+			this.processLifecycle.pause();
 		},
 		resume() {
-			this.running = true;
+			this.processLifecycle.resume();
 		},
 		connectEvents(otherId) {
 			this.eventTargets[otherId] = true;
@@ -253,13 +261,16 @@ class ClapAudioWorkletProcessor extends AudioWorkletProcessor {
 		},
 		loadState(stateArray) {
 			let bytes = new Uint8Array(stateArray);
-			return this.hostApi.pluginLoadState(this.pluginPtr, this.sendBytes(bytes));
+			let loaded = this.hostApi.pluginLoadState(this.pluginPtr, this.sendBytes(bytes));
+			if (loaded) this.processLifecycle.wake();
+			return loaded;
 		},
 		setParam(paramId, value) {
 			this.hostApi.pluginSetParam(this.pluginPtr, paramId, value);
 
 			// If we're being called here (in the AudioWorklet), then it's single-threaded, so there's no reason not to immediately flush
 			this.hostApi.pluginParamsFlush(this.pluginPtr);
+			this.processLifecycle.wake();
 			
 			return this.remoteMethods.getParam.call(this, paramId);
 		},
@@ -287,16 +298,10 @@ class ClapAudioWorkletProcessor extends AudioWorkletProcessor {
 	#averageJsMs = 0;
 	#averageWasmMs = 0;
 	#averageBlockMs = 0;
-	
-	process(inputs, outputs, parameters) {
-		let jsStartTime = now();
-		if (this.fatalError || !this.running) return false;
-		if (!this.ready) return true; // outputs are pre-filled with silence
 
-		let blockLength = (outputs[0] || inputs[0])[0].length;
-		
+	processBlock(inputs, outputs, blockLength) {
 		this.writePendingEvents();
-		
+
 		// Copy audio input
 		this.instanceAudioPointers.inputs.forEach((ptrs, inputPort) => {
 			let jsInput = inputs[inputPort];
@@ -306,27 +311,19 @@ class ClapAudioWorkletProcessor extends AudioWorkletProcessor {
 					let jsChannel = jsInput[channelIndex%jsInput.length];
 					instanceArray.set(jsChannel);
 				} else {
-					for (let i = 0; i < blockLength; ++i) instanceArray[i] = 0;
+					instanceArray.fill(0);
 				}
 			});
 		});
-		
-		// Actual process call
-		let wasmStartTime, wasmEndTime;
-		let processStatus;
-		try {
-			wasmStartTime = now();
-			processStatus = this.hostApi.pluginProcess(this.pluginPtr, blockLength);
-			if (this.instanceSingleThreaded) this.mainThreadCallback();
-			wasmEndTime = now();
-		} catch (e) {
-			this.failWithError(e);
-			return false;
-		}
+
+		let wasmStartTime = now();
+		let processStatus = this.hostApi.pluginProcess(this.pluginPtr, blockLength);
+		if (this.instanceSingleThreaded) this.mainThreadCallback();
+		let wasmEndTime = now();
 
 		// Copy audio output
 		outputs.forEach((output, outputPort) => {
-			let input = inputs[outputPort];
+			let input = inputs[outputPort] || [];
 			let ptrs = this.instanceAudioPointers.outputs[outputPort];
 			if (ptrs && ptrs.length) {
 				// We have an output - copy from that instead
@@ -342,18 +339,46 @@ class ClapAudioWorkletProcessor extends AudioWorkletProcessor {
 			}
 		});
 
-		let jsEndTime = now();
+		this.#averageWasmMs += (wasmEndTime - wasmStartTime - this.#averageWasmMs)
+			/cpuAveragePeriod;
+		return processStatus;
+	}
 
+	process(inputs, outputs, parameters) {
+		let jsStartTime = now();
+		if (this.fatalError) return false;
+		if (!this.ready) return true; // outputs are pre-filled with silence
+
+		let blockLength = (outputs.find(port => port.length)
+			|| inputs.find(port => port.length))?.[0].length ?? this.maxFramesCount;
+		let pendingEvents = globalThis.clapRouting[this.routingId].events.length > 0;
+		let processStatus;
+		try {
+			processStatus = this.processLifecycle.process({
+				frameCount: blockLength,
+				inputs,
+				outputs,
+				hasEvents: pendingEvents,
+				processBlock: () => this.processBlock(inputs, outputs, blockLength),
+			});
+		} catch (e) {
+			this.failWithError(e);
+			return false;
+		}
+		if (processStatus == null) {
+			this.#averageWasmMs -= this.#averageWasmMs/cpuAveragePeriod;
+		}
+
+		let jsEndTime = now();
 		let slew = 1/cpuAveragePeriod;
 		this.#averageJsMs += (jsEndTime - jsStartTime - this.#averageJsMs)*slew;
-		this.#averageWasmMs += (wasmEndTime - wasmStartTime - this.#averageWasmMs)*slew;
 		this.#averageBlockMs += (blockLength*1000/sampleRate - this.#averageBlockMs)*slew;
 
-		if (processStatus == 0/*CLAP_PROCESS_ERROR*/) {
+		if (processStatus === CLAP_PROCESS_ERROR) {
 			console.error("CLAP_PROCESS_ERROR");
 			return false;
 		}
-		return true;
+		return true; // Sleeping skips DSP, but must not terminate the AudioWorklet.
 	}
 }
 
