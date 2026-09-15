@@ -16,7 +16,7 @@ let cpuAveragePeriod = (typeof performance === 'object') ? 50 : 10000; // 150ms 
 function setTimerSharedArrayBuffer(sharedArrayBuffer) {
 	// We have a timer thread which is just spinning, putting performance.now() into shared memory
 	let dv = new DataView(sharedArrayBuffer);
-	now = _ => dv.getFloat32(0);
+	now = _ => dv.getFloat64(0);
 	cpuAveragePeriod = 50;
 }
 
