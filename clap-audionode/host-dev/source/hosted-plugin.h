@@ -24,6 +24,7 @@ struct HostedPlugin {
 	uint32_t pluginIndex = uint32_t(-1);
 	
 	std::atomic_flag mainThreadCallbackDone = ATOMIC_FLAG_INIT;
+	std::atomic<bool> processRequested{false};
 
 	Instance *instance;
 	using Arena = wclap::MemoryArena<Instance, false>;
@@ -50,6 +51,9 @@ struct HostedPlugin {
 	
 	// When active, this points to a struct in the Instance's memory, including buffers which the JS-side host knows how to fill out
 	Pointer<wclap_process> processStructPtr;
+	int64_t steadyTime = 0;
+	bool active = false;
+	bool processing = false;
 	
 	// TODO: lock-free queue to let us `addEvent32` safely
 	std::recursive_mutex pendingEventsMutex;
@@ -150,6 +154,7 @@ struct HostedPlugin {
 	}
 	~HostedPlugin() {
 		if (pluginPtr) {
+			stop();
 			callPlugin(pluginPtr[&wclap_plugin::destroy]);
 		}
 		arenaPool.returnToPool(audioThreadArena);
@@ -291,19 +296,34 @@ struct HostedPlugin {
 		}
 		cbor.close(); // array
 	}
+	bool setProcessing(bool shouldProcess) {
+		if (processing == shouldProcess) return true;
+		if (shouldProcess) {
+			if (!active || !callPlugin(pluginPtr[&wclap_plugin::start_processing])) return false;
+			processing = true;
+		} else {
+			callPlugin(pluginPtr[&wclap_plugin::stop_processing]);
+			processing = false;
+		}
+		return true;
+	}
 	bool start(double sRate, uint32_t minFrames, uint32_t maxFrames, CborWriter &cbor) {
 		if (!callPlugin(pluginPtr[&wclap_plugin::activate], sRate, minFrames, maxFrames)) {
 			cbor.addNull();
 			return false;
 		}
-		if (!callPlugin(pluginPtr[&wclap_plugin::start_processing])) {
+		active = true;
+		if (!setProcessing(true)) {
+			callPlugin(pluginPtr[&wclap_plugin::deactivate]);
+			active = false;
 			cbor.addNull();
 			return false;
 		}
 
 		// Set up a single process struct (to be re-used each time) with sufficiently big buffers
+		steadyTime = 0;
 		wclap_process processStruct{
-			.steady_time=-1,
+			.steady_time=steadyTime,
 			.frames_count=0,
 			.transport={0},
 			.audio_inputs={0},
@@ -389,8 +409,11 @@ struct HostedPlugin {
 		return true;
 	}
 	void stop() {
-		callPlugin(pluginPtr[&wclap_plugin::stop_processing]);
-		callPlugin(pluginPtr[&wclap_plugin::deactivate]);
+		setProcessing(false);
+		if (active) {
+			callPlugin(pluginPtr[&wclap_plugin::deactivate]);
+			active = false;
+		}
 	}
 	
 	uint32_t process(uint32_t blockLength) {
@@ -402,7 +425,9 @@ struct HostedPlugin {
 		sortCopiedEvents();
 	
 		instance->set(processStructPtr[&wclap_process::frames_count], blockLength);
+		instance->set(processStructPtr[&wclap_process::steady_time], steadyTime);
 		auto status = callPlugin(pluginPtr[&wclap_plugin::process], processStructPtr);
+		steadyTime += blockLength;
 		clearEvents();
 		return status;
 	}
@@ -439,7 +464,13 @@ struct HostedPlugin {
 		LOG_EXPR("host.request_restart()");
 	}
 	void hostRequestProcess() {
-		LOG_EXPR("host.request_process()");
+		processRequested.store(true);
+	}
+	bool takeProcessRequest() {
+		return processRequested.exchange(false);
+	}
+	void advanceSteadyTime(uint32_t blockLength) {
+		steadyTime += blockLength;
 	}
 	void hostRequestCallback() {
 		mainThreadCallbackDone.clear();
@@ -501,6 +532,10 @@ struct HostedPlugin {
 
 	void tailChanged() {
 		LOG_EXPR("host_tail.changed()");
+	}
+	uint32_t tailSamples() {
+		if (!tailExtPtr) return 0;
+		return callPlugin(tailExtPtr[&wclap_plugin_tail::get]);
 	}
 
 	bool saveState(std::vector<unsigned char> &buffer) {
