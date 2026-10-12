@@ -102,6 +102,9 @@ struct HostedPlugin {
 	}
 	void sortCopiedEvents() {
 		std::unique_lock<std::recursive_mutex> lock{pendingEventsMutex};
+		// Pending events are consumed backwards. Restore insertion order before
+		// stable sorting, so equally timed events retain their original order.
+		std::reverse(copiedInputEventPtrs.begin(), copiedInputEventPtrs.end());
 		std::stable_sort(copiedInputEventPtrs.begin(), copiedInputEventPtrs.end(), [](const CopiedEvent &a, const CopiedEvent &b){
 			return a.time < b.time;
 		});
@@ -433,6 +436,8 @@ struct HostedPlugin {
 		sortCopiedEvents();
 		
 		callPlugin(paramsExtPtr[&wclap_plugin_params::flush], inputEventsPtr, outputEventsPtr);
+		// The pointers refer to this scoped arena; pending non-parameter events stay queued.
+		copiedInputEventPtrs.clear();
 	}
 
 	void hostRequestRestart() {
