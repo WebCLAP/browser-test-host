@@ -291,7 +291,9 @@ struct HostedPlugin {
 		}
 		cbor.close(); // array
 	}
+	uint32_t previousBlockLength = 0;
 	bool start(double sRate, uint32_t minFrames, uint32_t maxFrames, CborWriter &cbor) {
+		previousBlockLength = 0;
 		if (!callPlugin(pluginPtr[&wclap_plugin::activate], sRate, minFrames, maxFrames)) {
 			cbor.addNull();
 			return false;
@@ -395,13 +397,24 @@ struct HostedPlugin {
 	
 	uint32_t process(uint32_t blockLength) {
 		std::unique_lock<std::recursive_mutex> lock{pendingEventsMutex};
+		// frames_count is host-owned and remains unchanged between equal-sized blocks.
+		if (blockLength != previousBlockLength) {
+			instance->set(processStructPtr[&wclap_process::frames_count], blockLength);
+			previousBlockLength = blockLength;
+		}
+		// Feedback graphs often process one sample with no incoming events.
+		// Keep the queue lock and cleanup semantics, but avoid an unused arena scope.
+		if (pendingEventStarts.empty() && copiedInputEventPtrs.empty()) {
+			auto status = callPlugin(pluginPtr[&wclap_plugin::process], processStructPtr);
+			clearEvents();
+			return status;
+		}
 		auto scoped = audioThreadArena->scoped();
 		while (!pendingEventStarts.empty()) {
 			copyEvent(scoped, pendingEventStarts.size() - 1);
 		}
 		sortCopiedEvents();
 	
-		instance->set(processStructPtr[&wclap_process::frames_count], blockLength);
 		auto status = callPlugin(pluginPtr[&wclap_plugin::process], processStructPtr);
 		clearEvents();
 		return status;
